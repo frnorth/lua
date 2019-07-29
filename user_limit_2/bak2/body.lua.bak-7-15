@@ -1,0 +1,21 @@
+function fcount(count, c, tab)
+    if c == nil then
+        count:set(tab, 0)
+    else
+        count:replace(tab, c + 1)
+    end
+end
+
+
+local cjson = require("cjson")
+local resp_body = ngx.arg[1]
+local count = ngx.shared.count
+
+local c_body = count:get_stale("body_cnt")
+-- 通过日志可以看到, body_filter 被用了很多次, 因为日志中, 第一次在access.lua打印 body_cnt 到 第二次打印, body_cnt直接增长了 23次
+fcount(count, c_body, "body_cnt")
+
+local body_shared = ngx.shared.body
+local body_id_str = string.format("body-%d", count:get_stale("body_cnt"))
+body_shared:set(body_id_str, tostring(resp_body))
+

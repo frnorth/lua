@@ -1,0 +1,139 @@
+function fcount(count, c, tab)
+    if c == nil then
+        count:set(tab, 0)
+        ngx.log(ngx.ERR, "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ init ", tab, "{{{SUCCESS}}} +++++((( ", tab, ": ", count:get_stale(tab), " )))+++++++++++++++++++++++++++++++++++++")
+    else
+        count:replace(tab, c + 1)
+        ngx.log(ngx.ERR, "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ accumulate ", tab, "{{{SUCCESS}}} +++++((( ", tab, ": ", count:get_stale(tab), " )))+++++++++++++++++++++++++++++++++++++")
+    end
+end
+
+
+
+local cjson = require "cjson"
+local redis = require "resty.redis"
+local red = redis:new()
+red:set_timeout(10000) -- 1 sec
+local ok, err = red:connect("127.0.0.1", 6379)
+if not ok then
+    ngx.say("failed to connect: ", err)
+    return
+end
+
+-- limit the require
+local limit_req = require "resty.limit.req"
+local lim, err = limit_req.new("my_limit_req_store", 100, 50)
+if not lim then
+    ngx.log(ngx.ERR,
+            "failed to instantiate a resty.limit.req object: ", err)
+    return ngx.exit(500)
+end
+
+local key = ngx.var.binary_remote_addr
+local delay, err = lim:incoming(key, true)
+if not delay then
+    if err == "rejected" then
+        return ngx.exit(503)
+    end
+    ngx.log(ngx.ERR, "failed to limit req: ", err)
+    return ngx.exit(500)
+end
+
+--///////////////////////////////////////////////////////////////////////////////
+-- 因为, 第一次请求时候, ngx.shared.body还是空的, 如果这里不进行判断, 则会直接报错, 貌似, access在body_filter前面
+-- shared, 没有被清空, 所以要想想办法.
+--!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+local count, err = ngx.shared.count
+local c = count:get_stale("cnt")
+local c_access = count:get_stale("access_cnt")
+local c_body = count:get_stale("body_cnt")
+
+local c_body_last = count:get_stale("body_cnt_last")
+if c_body_last == nil then
+    count:set("body_cnt_last", 0)
+    c_body_last = 0
+end
+
+fcount(count, c, "cnt")
+fcount(count, c_access, "access_cnt")
+ngx.log(ngx.ERR, "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ show body count {{{SUCCESS}}} +++++((( body_cnt: ", count:get_stale("body_cnt"), " )))  ((( body_cnt_last: ", count:get_stale("body_cnt_last"), " )))+++++++++++++++++++++++++++++++++++++")
+
+local body_shared = ngx.shared.body
+local id0 = string.format("body-%d", c_body_last)
+local i = c_body_last
+if c_body ~= nil
+then
+    while (i <= c_body)
+    do
+        local id = string.format("body-%d", i)
+        local str0 = body_shared:get_stale(id0)
+        local str1 = body_shared:get_stale(id)
+        body_shared:replace(id0, string.format("%s%s", str0, str1))
+        ngx.log(ngx.ERR, "//////////////////////////", i, "//////////////////////////")
+        red:set(id0, body_shared:get_stale(id0))
+        i = i + 1
+    --    red:set(id, body_shared:get_stale(id))
+    end
+end
+if c_body ~= nil then count:replace("body_cnt_last", c_body + 1) end
+
+
+-- filter the name
+-- lua的函数往往返回多个值, 所以如果不先将其赋值到变量中, 而直接作为结果进行另外一个参数的参数, 可能会出大问题 .. ?
+local str = body_shared:get_stale(id0)
+if str ~= nil
+then
+    if string.find(str, "success")
+    then
+    --str = string.match(str, "[^\"]+")
+        --red:set("haha", str)
+        --local tab = loadstring("return " .. str)
+
+        for k, v in string.gmatch(str, "\"([%w_-]+)\":\"([%w_-]+)\"") do
+            ngx.log(ngx.ERR, "&&&&&&&&&&&&&&&&&&&&&&&&&&", k, v, "&&&&&&&&&&&&&&&&&&&&&&&&&&&&")
+            red:set(k, v)
+        end
+
+    --if string.find(str, "success")
+    --then
+    --    --local json_body = cjson.encode(str)
+    --    --local body = cjson.decode(json_body)
+    --    local body = cjson.decode(str)
+    --    
+    --    --local table_body = cjson.decode(json_body)
+    --if tab ~= nil
+    --then
+        --for k, v in pairs(tab)
+        --do
+        --    red:set(k, v)
+        --end
+    --end
+    --end
+    end
+end
+body_shared:flush_all()
+body_shared:flush_expired()
+--===============================================================================================
+
+local h, err = ngx.resp.get_headers()
+if err then
+    ngx.log(ngx.ERR, "00000000000000000000  what ??? 00000000000000000")
+end
+for k, v in pairs(h) do
+    ngx.log(ngx.ERR, "RRRRRRRRRRRRRRRRRRRR respond header: ", k, v, " RRRRRRRRRRRRRRRRRRRRR")
+    red:set(k, v)
+end
+
+--///////////////////////////////////////////////////////////////////////////////
+
+if delay >= 0.001 then
+    local excess = err
+    ngx.sleep(delay)
+end
+-------------------------
+
+local ok, err = red:close()
+if not ok then
+    ngx.say("failed to close: ", err)
+    return
+end
